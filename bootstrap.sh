@@ -9,38 +9,64 @@ echo "========================================="
 echo "--> Updating package repositories..."
 sudo apt-get update -y && sudo apt-get upgrade -y
 
+# 1. Install Docker
 if ! command -v docker &> /dev/null; then
-    echo "--> Installing Docker and dependencies..."
+    echo "--> Installing Docker..."
     sudo apt-get install -y ca-certificates curl gnupg lsb-release
-    
     sudo mkdir -p /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg --yes
-
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-      $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
     sudo apt-get update -y
     sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-else
-    echo "--> Docker is already installed. Skipping..."
 fi
 
-echo "--> Setting up /opt/edge-proxy directories..."
-sudo mkdir -p /opt/edge-proxy/conf.d
-sudo mkdir -p /opt/edge-proxy/certbot/conf
-sudo mkdir -p /opt/edge-proxy/certbot/www
-
+# 2. Setup directories and permissions
+echo "--> Setting up /opt/edge-proxy..."
+sudo mkdir -p /opt/edge-proxy/{conf.d,certbot/conf,certbot/www}
 DEPLOY_USER=$(whoami)
-echo "--> Granting permissions for directory to user: $DEPLOY_USER"
 sudo chown -R "$DEPLOY_USER":"$DEPLOY_USER" /opt/edge-proxy
-
 if ! groups "$DEPLOY_USER" | grep &>/dev/null '\bdocker\b'; then
-    echo "--> Adding $DEPLOY_USER to the docker group..."
     sudo usermod -aG docker "$DEPLOY_USER"
-    echo "NOTE: You may need to log out and log back into your SSH terminal session for group changes to apply."
 fi
+
+# 3. Setup Cloudflare Tunnel and SSH hardening
+CF_TOKEN="$2"
+if [ -n "$CF_TOKEN" ]; then
+    echo "--> Installing and configuring Cloudflare Tunnel..."
+    curl -L https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-archive-keyring.gpg >/dev/null
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-archive-keyring.gpg] https://pkg.cloudflare.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare.list >/dev/null
+    sudo apt-get update && sudo apt-get install -y cloudflared
+    
+    sudo cloudflared service install "$CF_TOKEN"
+    sudo systemctl start cloudflared
+    
+    echo "--> Verifying tunnel..."
+    sleep 10
+    if systemctl is-active --quiet cloudflared; then
+        echo "--> Tunnel healthy. Restricting SSH to localhost..."
+        echo "ListenAddress 127.0.0.1" | sudo tee /etc/ssh/sshd_config.d/00-tunnel-only.conf > /dev/null
+        if sudo sshd -t; then
+            sudo systemctl restart ssh
+        else
+            echo "⚠️ SSH config test failed! Reverting."
+            sudo rm /etc/ssh/sshd_config.d/00-tunnel-only.conf && exit 1
+        fi
+    else
+        echo "⚠️ Cloudflared failed to start. Aborting SSH restriction." && exit 1
+    fi
+else
+    echo "--> No Cloudflare token provided. Skipping tunnel setup."
+fi
+
+# 4. Finalize Firewall (UFW)
+echo "--> Configuring UFW..."
+sudo apt-get install -y ufw
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw --force enable
 
 echo "========================================="
-echo "           Bootstrap Complete!           "
+echo "          Bootstrap Complete!            "
 echo "========================================="
