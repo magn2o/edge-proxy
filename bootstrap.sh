@@ -30,7 +30,7 @@ if ! groups "$DEPLOY_USER" | grep &>/dev/null '\bdocker\b'; then
 fi
 
 # 3. Setup Cloudflare Tunnel and SSH hardening
-CF_TOKEN="$2"
+CF_TOKEN="$1"
 if [ -n "$CF_TOKEN" ]; then
     echo "--> Installing and configuring Cloudflare Tunnel..."
     curl -L https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-archive-keyring.gpg >/dev/null
