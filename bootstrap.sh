@@ -38,7 +38,7 @@ sudo chown -R "$DEPLOY_USER":"$DEPLOY_USER" /opt/edge-proxy
 if ! groups "$DEPLOY_USER" | grep &>/dev/null '\bdocker\b'; then
     echo "--> Adding $DEPLOY_USER to the docker group..."
     sudo usermod -aG docker "$DEPLOY_USER"
-    echo "⚠NOTE: You may need to log out and log back into your SSH terminal session for group changes to apply."
+    echo "NOTE: You may need to log out and log back into your SSH terminal session for group changes to apply."
 fi
 
 echo "========================================="

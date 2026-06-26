@@ -20,23 +20,21 @@ jobs:
         env:
           HOME_SERVER_IP: ${{ secrets.HOME_SERVER_IP }}
           PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
         run: |
-          # Create our staging output directories matching the node layout
+          # 1. Setup nested staging folders
           mkdir -p output/conf.d
           mkdir -p output/certbot
+          mkdir -p output/config
           
-          # 1. Compile the modern compose.yaml file
+          # 2. Compile active template files
           envsubst '$PROXY_DOMAIN' < config/compose.yaml.template > output/compose.yaml
-          
-          # 2. Compile the Cloudflare API credentials ini file
-          envsubst '$CLOUDFLARE_API_TOKEN' < config/cloudflare.ini.template > output/certbot/cloudflare.ini
-          
-          # 3. Compile Plex Nginx routing (Explicitly leaving Nginx native variables untouched)
+          envsubst '$BUNNY_API_KEY' < config/bunny.ini.template > output/certbot/bunny.ini
           envsubst '$PROXY_DOMAIN,$HOME_SERVER_IP' < config/plex.conf.template > output/conf.d/plex.conf
           
-          # 4. Copy static nginx.conf into output workspace (No template injection required)
+          # 3. Copy static files into matching path layouts
           cp config/nginx.conf output/nginx.conf
+          cp config/Dockerfile output/config/Dockerfile
 
       - name: Loop and Deploy to Nodes
         env:
@@ -72,7 +70,7 @@ jobs:
             scp -i ~/.ssh/id_ed25519 -r output/* "${SSH_USER}@${node_ip}:/opt/edge-proxy/"
             
             # Set strict permissions on the credentials file so Certbot doesn't complain
-            ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_ip}" "chmod 600 /opt/edge-proxy/certbot/cloudflare.ini"
+            ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_ip}" "chmod 600 /opt/edge-proxy/certbot/bunny.ini"
             
             # Refresh edge services using native Compose v2 commands
             ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_ip}" "cd /opt/edge-proxy && docker compose up -d"

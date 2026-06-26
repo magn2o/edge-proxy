@@ -1,6 +1,6 @@
 services:
   nginx-edge:
-    image: nginx:alpine
+    image: nginx:1.27-alpine
     container_name: nginx-edge
     restart: unless-stopped
     network_mode: host
@@ -10,18 +10,20 @@ services:
       - ./certbot/conf:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
 
-  certbot:
-    image: certbot/dns-cloudflare:latest
+certbot:
+    build:
+      context: .
+      dockerfile: config/Dockerfile
     container_name: certbot
     restart: unless-stopped
     volumes:
       - ./certbot/conf:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot
-      - ./certbot/cloudflare.ini:/cloudflare.ini:ro
+      - ./certbot/bunny.ini:/bunny.ini:ro
     command: >
-      certonly --dns-cloudflare
-      --dns-cloudflare-credentials /cloudflare.ini
-      --dns-cloudflare-propagation-seconds 60
+      certonly --authenticator dns-bunny
+      --dns-bunny-credentials /bunny.ini
+      --dns-bunny-propagation-seconds 60
       --register-unsafely-without-email
       --agree-tos
-      -d ${PROXY_DOMAIN} -d *.${PROXY_DOMAIN}
+      -d ${PROXY_DOMAIN}
