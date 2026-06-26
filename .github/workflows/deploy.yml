@@ -1,0 +1,64 @@
+name: Deploy Proxy Configs to All Nodes
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  get-nodes:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Parse Node IPs from Secret
+        id: set-matrix
+        env:
+          RAW_HOSTS: ${{ secrets.SSH_HOSTS }}
+        run: |
+          # Takes the comma-separated string, splits it, and formats it into a clean JSON array
+          NODES=$(echo "$RAW_HOSTS" | tr ',' '\n' | grep -v '^$' | jq -R '.' | jq -s -c '.')
+          echo "matrix=${NODES}" >> $GITHUB_OUTPUT
+
+  deploy:
+    needs: get-nodes
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node_ip: ${{ fromJson(needs.get-nodes.outputs.matrix) }}
+    steps:
+      - name: Checkout Repository Code
+        uses: actions/checkout@v4
+
+      - name: Install envsubst
+        run: sudo apt-get update && sudo apt-get install -y gettext
+
+      - name: Compile Configuration Templates
+        env:
+          HOME_SERVER_IP: ${{ secrets.HOME_SERVER_IP }}
+          PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          mkdir -p output/conf.d
+          envsubst < config/docker-compose.yml.template > output/docker-compose.yml
+          envsubst '$PROXY_DOMAIN,$HOME_SERVER_IP' < config/plex.conf.template > output/conf.d/plex.conf
+
+      - name: Copy Configs to Target Node via SSH (${{ matrix.node_ip }})
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ matrix.node_ip }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: "output/*"
+          target: "/opt/edge-proxy"
+          strip_components: 1
+
+      - name: Restart Nginx Container (${{ matrix.node_ip }})
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ matrix.node_ip }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /opt/edge-proxy
+            docker compose up -d
