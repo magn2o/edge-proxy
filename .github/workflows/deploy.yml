@@ -48,36 +48,30 @@ jobs:
           RAW_HOSTS: ${{ vars.SSH_HOSTS }}
           SSH_USER: ${{ secrets.SSH_USER }}
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          CF_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
-          # Dynamically mask the host variable values so they never leak in the action logs
-          echo "::add-mask::$RAW_HOSTS"
-          
-          # Convert comma-separated string from vars.SSH_HOSTS into a bash array
+          # Convert comma-separated string to array
           IFS=',' read -r -a HOST_ARRAY <<< "$RAW_HOSTS"
           
           for node_host in "${HOST_ARRAY[@]}"; do
-            # Trim any accidental whitespace
             node_host=$(echo "$node_host" | xargs)
-            if [ -z "$node_host" ]; then continue; fi
+            [ -z "$node_host" ] && continue
             
-            # Mask the individual host string just to be absolutely sure
-            echo "::add-mask::$node_host"
             echo "--- Deploying to Node: ${node_host} ---"
             
-            # Setup ephemeral SSH workspace on the runner
+            # Setup SSH key
             mkdir -p ~/.ssh
             echo "$SSH_KEY" > ~/.ssh/id_ed25519
             chmod 600 ~/.ssh/id_ed25519
-            ssh-keyscan -H "$node_host" >> ~/.ssh/known_hosts 2>/dev/null
-
-            # Set permissions locally BEFORE sending so you don't need a separate chmod command
-            chmod 600 output/certbot/bunny.ini 2>/dev/null || true
-
-            tar -czf - -C output . | ssh -o ProxyCommand="cloudflared access ssh --hostname %h" -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_host}" "
+            
+            # Deploy via SSH Tunnel (ProxyCommand)
+            tar -czf - -C output . | ssh \
+              -o ProxyCommand="cloudflared access ssh --hostname %h --id $CF_CLIENT_ID --secret $CF_CLIENT_SECRET" \
+              -o StrictHostKeyChecking=accept-new \
+              -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_host}" "
                 mkdir -p /opt/edge-proxy/certbot /opt/edge-proxy/conf.d && \
                 tar -xzf - -C /opt/edge-proxy/ && \
                 cd /opt/edge-proxy && \
                 docker compose up -d --force-recreate"
-                        
-            echo "--- Finished Node: ${node_host} ---"
           done
