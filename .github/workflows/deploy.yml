@@ -18,7 +18,7 @@ jobs:
       - name: Compile Configuration Templates
         env:
           NGINX_VERSION: "1.30"
-          CERTBOT_VERSION: "v1.3.10"
+          CERTBOT_VERSION: "v1.3.0"
           HOME_SERVER_IP: ${{ secrets.HOME_SERVER_IP }}
           PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
           BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
