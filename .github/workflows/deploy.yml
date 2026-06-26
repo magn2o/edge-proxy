@@ -22,9 +22,14 @@ jobs:
           PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
+          # Create our staging output directories matching the node layout
           mkdir -p output/conf.d
-          envsubst < config/docker-compose.yml.template > output/docker-compose.yml
+          mkdir -p output/certbot
+          
+          # Compile files
+          envsubst '$PROXY_DOMAIN,$LE_EMAIL' < config/docker-compose.yml.template > output/docker-compose.yml
           envsubst '$PROXY_DOMAIN,$HOME_SERVER_IP' < config/plex.conf.template > output/conf.d/plex.conf
+          envsubst '$CLOUDFLARE_API_TOKEN' < config/cloudflare.ini.template > output/certbot/cloudflare.ini
 
       - name: Loop and Deploy to Nodes
         env:
@@ -32,31 +37,31 @@ jobs:
           SSH_USER: ${{ secrets.SSH_USER }}
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
-          # Dynamically mask the host variable values so they never leak in the action logs
           echo "::add-mask::$RAW_HOSTS"
-          
-          # Convert comma-separated string from vars.SSH_HOSTS into a bash array
           IFS=',' read -r -a HOST_ARRAY <<< "$RAW_HOSTS"
           
           for node_ip in "${HOST_ARRAY[@]}"; do
-            # Trim any accidental whitespace
             node_ip=$(echo "$node_ip" | xargs)
             if [ -z "$node_ip" ]; then continue; fi
             
-            # Mask the individual IP string just to be absolutely sure
             echo "::add-mask::$node_ip"
             echo "--- Deploying to Node: ${node_ip} ---"
             
-            # Setup ephemeral SSH workspace on the runner
             mkdir -p ~/.ssh
             echo "$SSH_KEY" > ~/.ssh/id_ed25519
             chmod 600 ~/.ssh/id_ed25519
             ssh-keyscan -H "$node_ip" >> ~/.ssh/known_hosts 2>/dev/null
             
-            # Securely sync compiled templates over port 22
+            # 1. Ensure the target directory structure exists on the remote node first
+            ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_ip}" "mkdir -p /opt/edge-proxy/certbot"
+            
+            # 2. Sync all compiled assets (docker-compose, conf.d, and certbot/cloudflare.ini)
             scp -i ~/.ssh/id_ed25519 -r output/* "${SSH_USER}@${node_ip}:/opt/edge-proxy/"
             
-            # Reload Docker services remotely
+            # 3. CRITICAL: Set strict permissions on the credentials file so Certbot doesn't complain
+            ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_ip}" "chmod 600 /opt/edge-proxy/certbot/cloudflare.ini"
+            
+            # 4. Spin up/refresh the containers
             ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_ip}" "cd /opt/edge-proxy && docker compose up -d"
             
             echo "--- Finished Node: ${node_ip} ---"
