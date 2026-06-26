@@ -29,13 +29,26 @@ if ! groups "$DEPLOY_USER" | grep &>/dev/null '\bdocker\b'; then
     sudo usermod -aG docker "$DEPLOY_USER"
 fi
 
+
+# Add cloudflare gpg key
+sudo mkdir -p --mode=0755 /usr/share/keyrings
+curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | sudo tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null
+
+# Add this repo to your apt repositories
+echo 'deb [signed-by=/usr/share/keyrings/cloudflare-public-v2.gpg] https://pkg.cloudflare.com/cloudflared any main' | sudo tee /etc/apt/sources.list.d/cloudflared.list
+
+# install cloudflared
+sudo apt-get update && sudo apt-get install cloudflared
+
 # 3. Setup Cloudflare Tunnel and SSH hardening
 CF_TOKEN="$1"
 if [ -n "$CF_TOKEN" ]; then
     echo "--> Installing and configuring Cloudflare Tunnel..."
-    curl -L https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-archive-keyring.gpg >/dev/null
-    echo "deb [signed-by=/usr/share/keyrings/cloudflare-archive-keyring.gpg] https://pkg.cloudflare.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare.list >/dev/null
-    sudo apt-get update && sudo apt-get install -y cloudflared
+    # Add cloudflare gpg key
+    sudo mkdir -p --mode=0755 /usr/share/keyrings
+    curl -fsSL https://pkg.cloudflare.com/cloudflare-public-v2.gpg | sudo tee /usr/share/keyrings/cloudflare-public-v2.gpg >/dev/null
+    echo 'deb [signed-by=/usr/share/keyrings/cloudflare-public-v2.gpg] https://pkg.cloudflare.com/cloudflared any main' | sudo tee /etc/apt/sources.list.d/cloudflared.list
+    sudo apt-get update && sudo apt-get install cloudflared
     
     sudo cloudflared service install "$CF_TOKEN"
     sudo systemctl start cloudflared
