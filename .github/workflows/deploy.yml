@@ -7,26 +7,8 @@ on:
       - test-pipeline
 
 jobs:
-  get-nodes:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - name: Parse Node IPs from Secret
-        id: set-matrix
-        env:
-          RAW_HOSTS: ${{ secrets.SSH_HOSTS }}
-        run: |
-          # Takes the comma-separated string, splits it, and formats it into a clean JSON array
-          NODES=$(echo "$RAW_HOSTS" | tr ',' '\n' | grep -v '^$' | jq -R '.' | jq -s -c '.')
-          echo "matrix=${NODES}" >> $GITHUB_OUTPUT
-
   deploy:
-    needs: get-nodes
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node_ip: ${{ fromJson(needs.get-nodes.outputs.matrix) }}
     steps:
       - name: Checkout Repository Code
         uses: actions/checkout@v4
@@ -44,22 +26,38 @@ jobs:
           envsubst < config/docker-compose.yml.template > output/docker-compose.yml
           envsubst '$PROXY_DOMAIN,$HOME_SERVER_IP' < config/plex.conf.template > output/conf.d/plex.conf
 
-      - name: Copy Configs to Target Node via SSH (${{ matrix.node_ip }})
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ matrix.node_ip }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "output/*"
-          target: "/opt/edge-proxy"
-          strip_components: 1
-
-      - name: Restart Nginx Container (${{ matrix.node_ip }})
-        uses: appleboy/ssh-action@master
-        with:
-          host: ${{ matrix.node_ip }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            cd /opt/edge-proxy
-            docker compose up -d
+      - name: Loop and Deploy to Nodes
+        env:
+          RAW_HOSTS: ${{ vars.SSH_HOSTS }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          # Dynamically mask the host variable values so they never leak in the action logs
+          echo "::add-mask::$RAW_HOSTS"
+          
+          # Convert comma-separated string from vars.SSH_HOSTS into a bash array
+          IFS=',' read -r -a HOST_ARRAY <<< "$RAW_HOSTS"
+          
+          for node_ip in "${HOST_ARRAY[@]}"; do
+            # Trim any accidental whitespace
+            node_ip=$(echo "$node_ip" | xargs)
+            if [ -z "$node_ip" ]; then continue; fi
+            
+            # Mask the individual IP string just to be absolutely sure
+            echo "::add-mask::$node_ip"
+            echo "--- Deploying to Node: ${node_ip} ---"
+            
+            # Setup ephemeral SSH workspace on the runner
+            mkdir -p ~/.ssh
+            echo "$SSH_KEY" > ~/.ssh/id_ed25519
+            chmod 600 ~/.ssh/id_ed25519
+            ssh-keyscan -H "$node_ip" >> ~/.ssh/known_hosts 2>/dev/null
+            
+            # Securely sync compiled templates over port 22
+            scp -i ~/.ssh/id_ed25519 -r output/* "${SSH_USER}@${node_ip}:/opt/edge-proxy/"
+            
+            # Reload Docker services remotely
+            ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_ip}" "cd /opt/edge-proxy && docker compose up -d"
+            
+            echo "--- Finished Node: ${node_ip} ---"
+          done
