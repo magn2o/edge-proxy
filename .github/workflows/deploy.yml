@@ -3,7 +3,6 @@ name: Deploy Proxy Configs to All Nodes
 on:
   push:
     branches:
-      - main
       - test-pipeline
 
 jobs:
@@ -18,6 +17,8 @@ jobs:
 
       - name: Compile Configuration Templates
         env:
+          NGINX_VERSION: "1.30"
+          CERTBOT_VERSION: "v1.3.10"
           HOME_SERVER_IP: ${{ secrets.HOME_SERVER_IP }}
           PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
           BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
@@ -28,13 +29,13 @@ jobs:
           mkdir -p output/config
           
           # 2. Compile active template files
-          envsubst '$PROXY_DOMAIN' < config/compose.yaml.template > output/compose.yaml
+          envsubst '$CERTBOT_VERSION' < config/Dockerfile.template > output/config/Dockerfile
+          envsubst '$NGINX_VERSION,$PROXY_DOMAIN' < config/compose.yaml.template > output/compose.yaml
           envsubst '$BUNNY_API_KEY' < config/bunny.ini.template > output/certbot/bunny.ini
           envsubst '$PROXY_DOMAIN,$HOME_SERVER_IP' < config/plex.conf.template > output/conf.d/plex.conf
           
           # 3. Copy static files into matching path layouts
           cp config/nginx.conf output/nginx.conf
-          cp config/Dockerfile output/config/Dockerfile
 
       - name: Loop and Deploy to Nodes
         env:
@@ -73,7 +74,7 @@ jobs:
             ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_ip}" "chmod 600 /opt/edge-proxy/certbot/bunny.ini"
             
             # Refresh edge services using native Compose v2 commands
-            ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_ip}" "cd /opt/edge-proxy && docker compose up -d"
+            ssh -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_ip}" "cd /opt/edge-proxy && docker compose up -d --force-recreate"
             
             echo "--- Finished Node: ${node_ip} ---"
           done

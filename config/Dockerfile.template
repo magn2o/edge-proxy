@@ -1,2 +1,2 @@
-FROM certbot/certbot:v3.1.0
+FROM certbot/certbot:${CERTBOT_VERSION}
 RUN pip install --no-cache-dir certbot-dns-bunny==3.0.0
