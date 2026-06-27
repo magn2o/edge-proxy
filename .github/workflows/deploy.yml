@@ -5,6 +5,10 @@ on:
     branches:
       - test-pipeline
 
+concurrency:
+  group: deploy-edge-proxy
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -23,8 +27,8 @@ jobs:
 
       - name: Compile Configuration Templates
         env:
-          NGINX_VERSION: "1.30"
-          CERTBOT_VERSION: "v3.1.0"
+          NGINX_VERSION: ${{ vars.NGINX_VERSION }}
+          CERTBOT_VERSION: ${{ vars.CERTBOT_VERSION }}
           HOME_SERVER_IP: ${{ secrets.HOME_SERVER_IP }}
           PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
           BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
@@ -43,6 +47,25 @@ jobs:
           # 3. Copy static files into matching path layouts
           cp config/nginx.conf output/nginx.conf
 
+      - name: Validate Nginx Configuration
+        env:
+          NGINX_VERSION: ${{ vars.NGINX_VERSION }}
+          PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
+        run: |
+          # nginx -t loads ssl_certificate paths even just to check syntax,
+          # so stand in dummy self-signed certs at the expected live/ path.
+          mkdir -p "/tmp/dummy-certs/live/${PROXY_DOMAIN}"
+          openssl req -x509 -newkey rsa:2048 -days 1 -nodes \
+            -subj "/CN=${PROXY_DOMAIN}" \
+            -keyout "/tmp/dummy-certs/live/${PROXY_DOMAIN}/privkey.pem" \
+            -out "/tmp/dummy-certs/live/${PROXY_DOMAIN}/fullchain.pem"
+
+          docker run --rm \
+            -v "$(pwd)/output/nginx.conf:/etc/nginx/nginx.conf:ro" \
+            -v "$(pwd)/output/conf.d:/etc/nginx/conf.d:ro" \
+            -v "/tmp/dummy-certs/live:/etc/letsencrypt/live:ro" \
+            "nginx:${NGINX_VERSION}-alpine" nginx -t
+
       - name: Loop and Deploy to Nodes
         env:
           RAW_HOSTS: ${{ vars.SSH_HOSTS }}
@@ -51,20 +74,23 @@ jobs:
           CF_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
+          set -euo pipefail
+
+          # Setup SSH key once for all hosts
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          trap 'rm -f ~/.ssh/id_ed25519' EXIT
+
           # Convert comma-separated string to array
           IFS=',' read -r -a HOST_ARRAY <<< "$RAW_HOSTS"
-          
+
           for node_host in "${HOST_ARRAY[@]}"; do
             node_host=$(echo "$node_host" | xargs)
             [ -z "$node_host" ] && continue
-            
+
             echo "--- Deploying to Node: ${node_host} ---"
-            
-            # Setup SSH key
-            mkdir -p ~/.ssh
-            echo "$SSH_KEY" > ~/.ssh/id_ed25519
-            chmod 600 ~/.ssh/id_ed25519
-            
+
             # Deploy via SSH Tunnel (ProxyCommand)
             tar -czf - -C output . | ssh \
               -o ProxyCommand="cloudflared access ssh --hostname %h --id $CF_CLIENT_ID --secret $CF_CLIENT_SECRET" \
@@ -73,5 +99,5 @@ jobs:
                 mkdir -p /opt/edge-proxy/certbot /opt/edge-proxy/conf.d && \
                 tar -xzf - -C /opt/edge-proxy/ && \
                 cd /opt/edge-proxy && \
-                docker compose up -d --force-recreate"
+                docker compose up -d"
           done
