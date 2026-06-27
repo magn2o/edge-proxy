@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - test-pipeline
+  schedule:
+    # Weekly cert renewal check. certbot --keep-until-expiring is a no-op
+    # unless the cert is actually within its renewal window.
+    - cron: '0 3 * * 1'
 
 concurrency:
   group: deploy-edge-proxy
@@ -26,28 +30,72 @@ jobs:
           sudo apt-get update && sudo apt-get install cloudflared
 
       - name: Compile Configuration Templates
+        if: github.event_name == 'push'
         env:
           NGINX_VERSION: ${{ vars.NGINX_VERSION }}
-          CERTBOT_VERSION: ${{ vars.CERTBOT_VERSION }}
           HOME_SERVER_IP: ${{ secrets.HOME_SERVER_IP }}
           PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
-          BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
         run: |
           # 1. Setup nested staging folders
           mkdir -p output/conf.d
-          mkdir -p output/certbot
-          mkdir -p output/config
-          
+          mkdir -p output/certbot/conf
+          mkdir -p output/certbot/www
+
           # 2. Compile active template files
-          envsubst '$CERTBOT_VERSION' < config/Dockerfile.template > output/config/Dockerfile
-          envsubst '$NGINX_VERSION,$PROXY_DOMAIN' < config/compose.yaml.template > output/compose.yaml
-          envsubst '$BUNNY_API_KEY' < config/bunny.ini.template > output/certbot/bunny.ini
+          envsubst '$NGINX_VERSION' < config/compose.yaml.template > output/compose.yaml
           envsubst '$PROXY_DOMAIN,$HOME_SERVER_IP' < config/plex.conf.template > output/conf.d/plex.conf
-          
+
           # 3. Copy static files into matching path layouts
           cp config/nginx.conf output/nginx.conf
 
+      - name: Cache Let's Encrypt State
+        uses: actions/cache@v4
+        with:
+          path: letsencrypt
+          key: letsencrypt-${{ secrets.PROXY_DOMAIN }}
+
+      - name: Issue/Renew Certificate (Centralized)
+        id: certbot
+        env:
+          CERTBOT_VERSION: ${{ vars.CERTBOT_VERSION }}
+          PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
+          BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
+        run: |
+          mkdir -p letsencrypt/conf letsencrypt/www
+          envsubst '$BUNNY_API_KEY' < config/bunny.ini.template > letsencrypt/bunny.ini
+          envsubst '$CERTBOT_VERSION' < config/Dockerfile.template > Dockerfile.certbot
+
+          docker build -t edge-proxy-certbot -f Dockerfile.certbot .
+
+          CERT_FILE="letsencrypt/conf/live/${PROXY_DOMAIN}/fullchain.pem"
+          BEFORE_HASH=$( [ -f "$CERT_FILE" ] && sha256sum "$CERT_FILE" || echo "none" )
+
+          docker run --rm \
+            -v "$(pwd)/letsencrypt/conf:/etc/letsencrypt" \
+            -v "$(pwd)/letsencrypt/www:/var/www/certbot" \
+            -v "$(pwd)/letsencrypt/bunny.ini:/bunny.ini:ro" \
+            edge-proxy-certbot \
+            certonly --authenticator dns-bunny \
+              --dns-bunny-credentials /bunny.ini \
+              --dns-bunny-propagation-seconds 60 \
+              --register-unsafely-without-email \
+              --agree-tos \
+              --keep-until-expiring \
+              -d "${PROXY_DOMAIN}"
+
+          AFTER_HASH=$(sha256sum "$CERT_FILE")
+          if [ "$BEFORE_HASH" != "$AFTER_HASH" ]; then
+            echo "renewed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "renewed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          mkdir -p output/certbot/conf output/certbot/www
+          cp -r letsencrypt/conf/. output/certbot/conf
+          cp -r letsencrypt/www/. output/certbot/www
+
       - name: Validate Nginx Configuration
+        if: github.event_name == 'push'
         env:
           NGINX_VERSION: ${{ vars.NGINX_VERSION }}
           PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
@@ -66,23 +114,25 @@ jobs:
             -v "/tmp/dummy-certs/live:/etc/letsencrypt/live:ro" \
             "nginx:${NGINX_VERSION}-alpine" nginx -t
 
+      - name: Setup SSH Key
+        if: github.event_name == 'push' || steps.certbot.outputs.renewed == 'true'
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
       - name: Loop and Deploy to Nodes
+        if: github.event_name == 'push'
         env:
           RAW_HOSTS: ${{ vars.SSH_HOSTS }}
           SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
           CF_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
           set -euo pipefail
 
-          # Setup SSH key once for all hosts
-          mkdir -p ~/.ssh
-          echo "$SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          trap 'rm -f ~/.ssh/id_ed25519' EXIT
-
-          # Convert comma-separated string to array
           IFS=',' read -r -a HOST_ARRAY <<< "$RAW_HOSTS"
 
           for node_host in "${HOST_ARRAY[@]}"; do
@@ -101,3 +151,34 @@ jobs:
                 cd /opt/edge-proxy && \
                 docker compose up -d"
           done
+
+      - name: Sync Renewed Certificate to Nodes
+        if: github.event_name == 'schedule' && steps.certbot.outputs.renewed == 'true'
+        env:
+          RAW_HOSTS: ${{ vars.SSH_HOSTS }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          CF_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+
+          IFS=',' read -r -a HOST_ARRAY <<< "$RAW_HOSTS"
+
+          for node_host in "${HOST_ARRAY[@]}"; do
+            node_host=$(echo "$node_host" | xargs)
+            [ -z "$node_host" ] && continue
+
+            echo "--- Syncing renewed cert to Node: ${node_host} ---"
+
+            # Ship only the renewed cert material, then reload nginx in place.
+            tar -czf - -C output certbot | ssh \
+              -o ProxyCommand="cloudflared access ssh --hostname %h --id $CF_CLIENT_ID --secret $CF_CLIENT_SECRET" \
+              -o StrictHostKeyChecking=accept-new \
+              -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_host}" "
+                tar -xzf - -C /opt/edge-proxy/ && \
+                docker exec nginx-edge nginx -s reload"
+          done
+
+      - name: Clean Up SSH Key
+        if: always()
+        run: rm -f ~/.ssh/id_ed25519
