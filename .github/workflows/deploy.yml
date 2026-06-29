@@ -1,9 +1,7 @@
 name: Deploy Proxy Configs to All Nodes
 
 on:
-  push:
-    branches:
-      - test-pipeline
+  workflow_dispatch:
   schedule:
     # Weekly cert renewal check. certbot --keep-until-expiring is a no-op
     # unless the cert is actually within its renewal window.
@@ -30,7 +28,7 @@ jobs:
           sudo apt-get update && sudo apt-get install cloudflared
 
       - name: Compile Configuration Templates
-        if: github.event_name == 'push'
+        if: github.event_name == 'workflow_dispatch'
         env:
           NGINX_VERSION: ${{ vars.NGINX_VERSION }}
           HOME_SERVER_IP: ${{ secrets.HOME_SERVER_IP }}
@@ -95,7 +93,7 @@ jobs:
           cp -r letsencrypt/www/. output/certbot/www
 
       - name: Validate Nginx Configuration
-        if: github.event_name == 'push'
+        if: github.event_name == 'workflow_dispatch'
         env:
           NGINX_VERSION: ${{ vars.NGINX_VERSION }}
           PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
@@ -115,7 +113,7 @@ jobs:
             "nginx:${NGINX_VERSION}-alpine" nginx -t
 
       - name: Setup SSH Key
-        if: github.event_name == 'push' || steps.certbot.outputs.renewed == 'true'
+        if: github.event_name == 'workflow_dispatch' || steps.certbot.outputs.renewed == 'true'
         env:
           SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
         run: |
@@ -124,7 +122,7 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
 
       - name: Loop and Deploy to Nodes
-        if: github.event_name == 'push'
+        if: github.event_name == 'workflow_dispatch'
         env:
           RAW_HOSTS: ${{ vars.SSH_HOSTS }}
           SSH_USER: ${{ secrets.SSH_USER }}
