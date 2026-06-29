@@ -87,6 +87,8 @@ jobs:
               --dns-bunny-propagation-seconds 60 \
               --register-unsafely-without-email \
               --agree-tos \
+              --non-interactive \
+              --expand \
               --keep-until-expiring \
               "${DOMAIN_ARGS[@]}"
 
