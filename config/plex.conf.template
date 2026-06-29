@@ -6,7 +6,7 @@ upstream plex_backend {
 server {
     listen 80;
     listen [::]:80;
-    server_name ${PROXY_DOMAIN};
+    server_name ${PROXY_DOMAIN} ${REGION_DOMAIN};
 
     location / {
         return 301 https://$host$request_uri;
@@ -17,7 +17,7 @@ server {
     listen 443 ssl;
     listen [::]:443 ssl;
     http2 on;
-    server_name ${PROXY_DOMAIN};
+    server_name ${PROXY_DOMAIN} ${REGION_DOMAIN};
 
     ssl_certificate /etc/letsencrypt/live/${PROXY_DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${PROXY_DOMAIN}/privkey.pem;

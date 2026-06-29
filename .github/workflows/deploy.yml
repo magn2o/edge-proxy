@@ -27,21 +27,18 @@ jobs:
           echo "deb [signed-by=/usr/share/keyrings/cloudflare-archive-keyring.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
           sudo apt-get update && sudo apt-get install cloudflared
 
-      - name: Compile Configuration Templates
+      - name: Compile Shared Configuration Templates
         if: github.event_name == 'workflow_dispatch'
         env:
           NGINX_VERSION: ${{ vars.NGINX_VERSION }}
-          HOME_SERVER_IP: ${{ secrets.HOME_SERVER_IP }}
-          PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
         run: |
           # 1. Setup nested staging folders
           mkdir -p output/conf.d
           mkdir -p output/certbot/conf
           mkdir -p output/certbot/www
 
-          # 2. Compile active template files
+          # 2. Compile shared (non-host-specific) template files
           envsubst '$NGINX_VERSION' < config/compose.yaml.template > output/compose.yaml
-          envsubst '$PROXY_DOMAIN,$HOME_SERVER_IP' < config/plex.conf.template > output/conf.d/plex.conf
 
           # 3. Copy static files into matching path layouts
           cp config/nginx.conf output/nginx.conf
@@ -58,6 +55,7 @@ jobs:
           CERTBOT_VERSION: ${{ vars.CERTBOT_VERSION }}
           PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
           BUNNY_API_KEY: ${{ secrets.BUNNY_API_KEY }}
+          RAW_HOSTS: ${{ vars.SSH_HOSTS }}
         run: |
           mkdir -p letsencrypt/conf letsencrypt/www
           envsubst '$BUNNY_API_KEY' < config/bunny.ini.template > letsencrypt/bunny.ini
@@ -67,6 +65,17 @@ jobs:
 
           CERT_FILE="letsencrypt/conf/live/${PROXY_DOMAIN}/fullchain.pem"
           BEFORE_HASH=$( [ -f "$CERT_FILE" ] && sha256sum "$CERT_FILE" || echo "none" )
+
+          # Build -d flags: the primary GeoDNS domain plus one per-region domain
+          # derived from SSH_HOSTS (format: region:host,region:host,...).
+          DOMAIN_ARGS=(-d "${PROXY_DOMAIN}")
+          IFS=',' read -r -a HOST_ARRAY <<< "$RAW_HOSTS"
+          for entry in "${HOST_ARRAY[@]}"; do
+            entry=$(echo "$entry" | xargs)
+            [ -z "$entry" ] && continue
+            region="${entry%%:*}"
+            DOMAIN_ARGS+=(-d "${region}.${PROXY_DOMAIN}")
+          done
 
           docker run --rm \
             -v "$(pwd)/letsencrypt/conf:/etc/letsencrypt" \
@@ -79,7 +88,7 @@ jobs:
               --register-unsafely-without-email \
               --agree-tos \
               --keep-until-expiring \
-              -d "${PROXY_DOMAIN}"
+              "${DOMAIN_ARGS[@]}"
 
           AFTER_HASH=$(sha256sum "$CERT_FILE")
           if [ "$BEFORE_HASH" != "$AFTER_HASH" ]; then
@@ -96,8 +105,15 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         env:
           NGINX_VERSION: ${{ vars.NGINX_VERSION }}
+          HOME_SERVER_IP: ${{ secrets.HOME_SERVER_IP }}
           PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
         run: |
+          # Render a representative plex.conf (sample region) purely to check syntax;
+          # the real per-host configs are rendered later in the deploy loop.
+          REGION_DOMAIN="sample.${PROXY_DOMAIN}" \
+            envsubst '$PROXY_DOMAIN,$HOME_SERVER_IP,$REGION_DOMAIN' \
+            < config/plex.conf.template > output/conf.d/plex.conf
+
           # nginx -t loads ssl_certificate paths even just to check syntax,
           # so stand in dummy self-signed certs at the expected live/ path.
           mkdir -p "/tmp/dummy-certs/live/${PROXY_DOMAIN}"
@@ -111,6 +127,8 @@ jobs:
             -v "$(pwd)/output/conf.d:/etc/nginx/conf.d:ro" \
             -v "/tmp/dummy-certs/live:/etc/letsencrypt/live:ro" \
             "nginx:${NGINX_VERSION}-alpine" nginx -t
+
+          rm -f output/conf.d/plex.conf
 
       - name: Setup SSH Key
         if: github.event_name == 'workflow_dispatch' || steps.certbot.outputs.renewed == 'true'
@@ -128,16 +146,27 @@ jobs:
           SSH_USER: ${{ secrets.SSH_USER }}
           CF_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          HOME_SERVER_IP: ${{ secrets.HOME_SERVER_IP }}
+          PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
         run: |
           set -euo pipefail
 
+          # SSH_HOSTS format: region:host,region:host,...
           IFS=',' read -r -a HOST_ARRAY <<< "$RAW_HOSTS"
 
-          for node_host in "${HOST_ARRAY[@]}"; do
-            node_host=$(echo "$node_host" | xargs)
-            [ -z "$node_host" ] && continue
+          for entry in "${HOST_ARRAY[@]}"; do
+            entry=$(echo "$entry" | xargs)
+            [ -z "$entry" ] && continue
 
-            echo "--- Deploying to Node: ${node_host} ---"
+            region="${entry%%:*}"
+            node_host="${entry#*:}"
+
+            echo "--- Deploying to Node: ${node_host} (region: ${region}) ---"
+
+            # Render this node's plex.conf with its region-specific hostname
+            REGION_DOMAIN="${region}.${PROXY_DOMAIN}" \
+              envsubst '$PROXY_DOMAIN,$HOME_SERVER_IP,$REGION_DOMAIN' \
+              < config/plex.conf.template > output/conf.d/plex.conf
 
             # Deploy via SSH Tunnel (ProxyCommand)
             tar -czf - -C output . | ssh \
@@ -160,11 +189,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          # SSH_HOSTS format: region:host,region:host,...
           IFS=',' read -r -a HOST_ARRAY <<< "$RAW_HOSTS"
 
-          for node_host in "${HOST_ARRAY[@]}"; do
-            node_host=$(echo "$node_host" | xargs)
-            [ -z "$node_host" ] && continue
+          for entry in "${HOST_ARRAY[@]}"; do
+            entry=$(echo "$entry" | xargs)
+            [ -z "$entry" ] && continue
+            node_host="${entry#*:}"
 
             echo "--- Syncing renewed cert to Node: ${node_host} ---"
 
