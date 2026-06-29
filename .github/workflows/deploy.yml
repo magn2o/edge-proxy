@@ -90,7 +90,11 @@ jobs:
               --keep-until-expiring \
               "${DOMAIN_ARGS[@]}"
 
-          AFTER_HASH=$(sudo sha256sum "$CERT_FILE")
+          # certbot runs as root inside the container; reclaim ownership so the
+          # runner user (and the later actions/cache save step) can read it.
+          sudo chown -R "$(id -u):$(id -g)" letsencrypt
+
+          AFTER_HASH=$(sha256sum "$CERT_FILE")
           if [ "$BEFORE_HASH" != "$AFTER_HASH" ]; then
             echo "renewed=true" >> "$GITHUB_OUTPUT"
           else
@@ -98,9 +102,8 @@ jobs:
           fi
 
           mkdir -p output/certbot/conf output/certbot/www
-          sudo cp -r letsencrypt/conf/. output/certbot/conf
-          sudo cp -r letsencrypt/www/. output/certbot/www
-          sudo chown -R "$(id -u):$(id -g)" output/certbot
+          cp -r letsencrypt/conf/. output/certbot/conf
+          cp -r letsencrypt/www/. output/certbot/www
 
       - name: Validate Nginx Configuration
         if: github.event_name == 'workflow_dispatch'
