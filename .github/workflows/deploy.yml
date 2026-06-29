@@ -64,7 +64,7 @@ jobs:
           docker build -t edge-proxy-certbot -f Dockerfile.certbot .
 
           CERT_FILE="letsencrypt/conf/live/${PROXY_DOMAIN}/fullchain.pem"
-          BEFORE_HASH=$( [ -f "$CERT_FILE" ] && sha256sum "$CERT_FILE" || echo "none" )
+          BEFORE_HASH=$(sudo sh -c "[ -f '$CERT_FILE' ] && sha256sum '$CERT_FILE'" || echo "none")
 
           # Build -d flags: the primary GeoDNS domain plus one per-region domain
           # derived from SSH_HOSTS (format: region:host,region:host,...).
@@ -90,7 +90,7 @@ jobs:
               --keep-until-expiring \
               "${DOMAIN_ARGS[@]}"
 
-          AFTER_HASH=$(sha256sum "$CERT_FILE")
+          AFTER_HASH=$(sudo sha256sum "$CERT_FILE")
           if [ "$BEFORE_HASH" != "$AFTER_HASH" ]; then
             echo "renewed=true" >> "$GITHUB_OUTPUT"
           else
@@ -98,8 +98,9 @@ jobs:
           fi
 
           mkdir -p output/certbot/conf output/certbot/www
-          cp -r letsencrypt/conf/. output/certbot/conf
-          cp -r letsencrypt/www/. output/certbot/www
+          sudo cp -r letsencrypt/conf/. output/certbot/conf
+          sudo cp -r letsencrypt/www/. output/certbot/www
+          sudo chown -R "$(id -u):$(id -g)" output/certbot
 
       - name: Validate Nginx Configuration
         if: github.event_name == 'workflow_dispatch'
