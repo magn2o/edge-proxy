@@ -37,40 +37,43 @@ if ! groups "$DEPLOY_USER" | grep -q '\bdocker\b'; then
     sudo usermod -aG docker "$DEPLOY_USER"
 fi
 
-# 3. Setup Cloudflare Tunnel and SSH hardening
-CF_TUNNEL_TOKEN="${CF_TUNNEL_TOKEN:-}"
-if [ -n "$CF_TUNNEL_TOKEN" ]; then
-    log "Installing and configuring Cloudflare Tunnel..."
+# 3. Install Tailscale and join tailnet
+TAILSCALE_AUTH_KEY="${TAILSCALE_AUTH_KEY:-}"
+TAILSCALE_HOSTNAME="${TAILSCALE_HOSTNAME:-}"
 
-    if ! command -v cloudflared &> /dev/null; then
-        sudo mkdir -p --mode=0755 /usr/share/keyrings
-        curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-main.gpg > /dev/null
-        echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
-        sudo DEBIAN_FRONTEND=noninteractive apt-get update -y
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y cloudflared
+if [ -n "$TAILSCALE_AUTH_KEY" ]; then
+    log "Installing Tailscale..."
+    if ! command -v tailscale &> /dev/null; then
+        curl -fsSL https://tailscale.com/install.sh | sh
     fi
 
-    if ! systemctl is-enabled --quiet cloudflared 2>/dev/null; then
-        sudo cloudflared service install "$CF_TUNNEL_TOKEN"
-    fi
-    sudo systemctl start cloudflared
+    log "Joining tailnet..."
+    HOSTNAME_ARG=""
+    [ -n "$TAILSCALE_HOSTNAME" ] && HOSTNAME_ARG="--hostname=${TAILSCALE_HOSTNAME}"
 
-    log "Verifying tunnel..."
-    sleep 10
-    if systemctl is-active --quiet cloudflared; then
-        log "Tunnel healthy. Restricting SSH to localhost..."
-        echo "ListenAddress 127.0.0.1" | sudo tee /etc/ssh/sshd_config.d/00-tunnel-only.conf > /dev/null
+    sudo tailscale up \
+        --authkey="${TAILSCALE_AUTH_KEY}" \
+        --ssh \
+        --accept-routes \
+        ${HOSTNAME_ARG}
+
+    log "Verifying Tailscale..."
+    sleep 5
+    if tailscale status --peers=false | grep -q "^100\."; then
+        TAILSCALE_IP=$(tailscale ip -4)
+        log "Tailscale active at ${TAILSCALE_IP}. Restricting SSH to Tailscale interface..."
+        echo "ListenAddress ${TAILSCALE_IP}" | sudo tee /etc/ssh/sshd_config.d/00-tailscale-only.conf > /dev/null
         if sudo sshd -t; then
             sudo systemctl restart ssh
         else
             err "SSH config test failed! Reverting."
-            sudo rm /etc/ssh/sshd_config.d/00-tunnel-only.conf && exit 1
+            sudo rm /etc/ssh/sshd_config.d/00-tailscale-only.conf && exit 1
         fi
     else
-        err "Cloudflared failed to start. Aborting SSH restriction." && exit 1
+        err "Tailscale failed to start. Aborting SSH restriction." && exit 1
     fi
 else
-    log "No Cloudflare tunnel token provided (CF_TUNNEL_TOKEN unset). Skipping tunnel setup."
+    log "No Tailscale auth key provided (TAILSCALE_AUTH_KEY unset). Skipping Tailscale setup."
 fi
 
 # 4. Finalize Firewall (UFW)
@@ -80,6 +83,9 @@ sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
+# Allow SSH over Tailscale (port 22 on the Tailscale interface is handled by
+# sshd's ListenAddress above; UFW still needs to permit the port itself).
+sudo ufw allow in on tailscale0 to any port 22
 sudo ufw --force enable
 
 echo "========================================="

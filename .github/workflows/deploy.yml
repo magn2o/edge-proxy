@@ -21,11 +21,12 @@ jobs:
       - name: Install envsubst
         run: sudo apt-get update && sudo apt-get install -y gettext
 
-      - name: Install cloudflared
-        run: |
-          curl -L https://pkg.cloudflare.com/cloudflare-main.gpg | sudo tee /usr/share/keyrings/cloudflare-archive-keyring.gpg >/dev/null
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-archive-keyring.gpg] https://pkg.cloudflare.com/cloudflared $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflared.list
-          sudo apt-get update && sudo apt-get install cloudflared
+      - name: Connect to Tailnet
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TAILSCALE_OAUTH_CLIENT_SECRET }}
+          tags: tag:ci
 
       - name: Compile Shared Configuration Templates
         if: github.event_name == 'workflow_dispatch'
@@ -67,7 +68,7 @@ jobs:
           BEFORE_HASH=$(sudo sh -c "[ -f '$CERT_FILE' ] && sha256sum '$CERT_FILE'" || echo "none")
 
           # Build -d flags: the primary GeoDNS domain plus one per-region domain
-          # derived from SSH_HOSTS (format: region:host,region:host,...).
+          # derived from SSH_HOSTS (format: region:tailscale-hostname,...).
           DOMAIN_ARGS=(-d "${PROXY_DOMAIN}")
           IFS=',' read -r -a HOST_ARRAY <<< "$RAW_HOSTS"
           for entry in "${HOST_ARRAY[@]}"; do
@@ -136,28 +137,17 @@ jobs:
 
           rm -f output/conf.d/plex.conf
 
-      - name: Setup SSH Key
-        if: github.event_name == 'workflow_dispatch' || steps.certbot.outputs.renewed == 'true'
-        env:
-          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-        run: |
-          mkdir -p ~/.ssh
-          echo "$SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-
       - name: Loop and Deploy to Nodes
         if: github.event_name == 'workflow_dispatch'
         env:
           RAW_HOSTS: ${{ vars.SSH_HOSTS }}
           SSH_USER: ${{ secrets.SSH_USER }}
-          CF_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           HOME_SERVER_IP: ${{ secrets.HOME_SERVER_IP }}
           PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
         run: |
           set -euo pipefail
 
-          # SSH_HOSTS format: region:host,region:host,...
+          # SSH_HOSTS format: region:tailscale-hostname,...
           IFS=',' read -r -a HOST_ARRAY <<< "$RAW_HOSTS"
 
           for entry in "${HOST_ARRAY[@]}"; do
@@ -174,11 +164,10 @@ jobs:
               envsubst '$PROXY_DOMAIN,$HOME_SERVER_IP,$REGION_DOMAIN' \
               < config/plex.conf.template > output/conf.d/plex.conf
 
-            # Deploy via SSH Tunnel (ProxyCommand)
+            # Deploy via Tailscale SSH (no key or ProxyCommand needed)
             tar -czf - -C output . | ssh \
-              -o ProxyCommand="cloudflared access ssh --hostname %h --id $CF_CLIENT_ID --secret $CF_CLIENT_SECRET" \
               -o StrictHostKeyChecking=accept-new \
-              -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_host}" "
+              "${SSH_USER}@${node_host}" "
                 mkdir -p /opt/edge-proxy/certbot /opt/edge-proxy/conf.d && \
                 tar -xzf - -C /opt/edge-proxy/ && \
                 cd /opt/edge-proxy && \
@@ -190,12 +179,10 @@ jobs:
         env:
           RAW_HOSTS: ${{ vars.SSH_HOSTS }}
           SSH_USER: ${{ secrets.SSH_USER }}
-          CF_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
           set -euo pipefail
 
-          # SSH_HOSTS format: region:host,region:host,...
+          # SSH_HOSTS format: region:tailscale-hostname,...
           IFS=',' read -r -a HOST_ARRAY <<< "$RAW_HOSTS"
 
           for entry in "${HOST_ARRAY[@]}"; do
@@ -207,13 +194,8 @@ jobs:
 
             # Ship only the renewed cert material, then reload nginx in place.
             tar -czf - -C output certbot | ssh \
-              -o ProxyCommand="cloudflared access ssh --hostname %h --id $CF_CLIENT_ID --secret $CF_CLIENT_SECRET" \
               -o StrictHostKeyChecking=accept-new \
-              -i ~/.ssh/id_ed25519 "${SSH_USER}@${node_host}" "
+              "${SSH_USER}@${node_host}" "
                 tar -xzf - -C /opt/edge-proxy/ && \
                 docker exec nginx-edge nginx -s reload"
           done
-
-      - name: Clean Up SSH Key
-        if: always()
-        run: rm -f ~/.ssh/id_ed25519
