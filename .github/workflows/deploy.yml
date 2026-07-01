@@ -144,6 +144,7 @@ jobs:
           SSH_USER: ${{ secrets.SSH_USER }}
           HOME_SERVER_IP: ${{ secrets.HOME_SERVER_IP }}
           PROXY_DOMAIN: ${{ secrets.PROXY_DOMAIN }}
+          LOKI_HOST: ${{ secrets.LOKI_HOST }}
         run: |
           set -euo pipefail
 
@@ -163,6 +164,11 @@ jobs:
             REGION_DOMAIN="${region}.${PROXY_DOMAIN}" \
               envsubst '$PROXY_DOMAIN,$HOME_SERVER_IP,$REGION_DOMAIN' \
               < config/plex.conf.template > output/conf.d/plex.conf
+
+            # Render this node's promtail config with its region label
+            REGION="${region}" \
+              envsubst '$LOKI_HOST,$REGION' \
+              < config/promtail.yaml.template > output/promtail.yaml
 
             # Deploy via Tailscale SSH (no key or ProxyCommand needed)
             tar -czf - -C output . | ssh \
