@@ -55,6 +55,7 @@ if [ -n "$TAILSCALE_AUTH_KEY" ]; then
         --authkey="${TAILSCALE_AUTH_KEY}" \
         --ssh \
         --accept-routes \
+        --advertise-tags=tag:server \
         ${HOSTNAME_ARG}
 
     log "Verifying Tailscale..."
